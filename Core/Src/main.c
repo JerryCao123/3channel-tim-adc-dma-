@@ -477,6 +477,14 @@ void RecordInterval(uint32_t start_us, uint32_t end_us, uint16_t max_val,uint8_t
 
 //  IntervalResult *res = &results[result_cnt];
 	IntervalResult *res = &buf->data[buf->cnt];
+	
+	if (end_us < start_us)
+    {
+//        printf("!!! ERROR: Underflow detected in RecordInterval !!!\r\n");
+//        printf("!!! start_us=%llu, end_us=%llu !!!\r\n", start_us, end_us);
+        // 可以选择不记录这个错误的区间，或者采取其他措施
+        return; 
+    }
   res->duration = end_us - start_us + 1;  // 持续时间（us）//+1
 
   if (max_val < THRESHOLD_B) res->range = 1;

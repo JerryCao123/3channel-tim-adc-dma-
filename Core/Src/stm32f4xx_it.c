@@ -58,7 +58,7 @@
 extern DMA_HandleTypeDef hdma_adc1;
 extern DMA_HandleTypeDef hdma_adc2;
 extern DMA_HandleTypeDef hdma_adc3;
-extern TIM_HandleTypeDef htim3;
+//extern TIM_HandleTypeDef htim3;
 extern TIM_HandleTypeDef htim4;
 /* USER CODE BEGIN EV */
 
@@ -215,10 +215,10 @@ void DMA2_Stream0_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-void TIM3_IRQHandler(void) 
-{
-  HAL_TIM_IRQHandler(&htim3);  // 交给HAL库处理（内部会判断中断类型）
-}
+//void TIM3_IRQHandler(void) 
+//{
+//  HAL_TIM_IRQHandler(&htim3);  // 交给HAL库处理（内部会判断中断类型）
+//}
 void TIM4_IRQHandler(void) 
 {
   HAL_TIM_IRQHandler(&htim4);  // 交给HAL库处理（内部会判断中断类型）

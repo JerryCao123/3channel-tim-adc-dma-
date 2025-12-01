@@ -33,10 +33,8 @@
 
 // 1. 结果缓存双缓冲（解决SD卡阻塞）
 #define RESULT_BUF_SIZE 20  // 单个结果缓冲区大小（可存300个区间，应对100ms数据量）
-//static uint8_t consecutive_low_count = 0;
-//// 定义一个需要连续检测的低电平数量，例如 5
-//#define CONSECUTIVE_LOW_THRESHOLD 5
 
+#define ADC_SAMPLE_PERIOD_US 1
 /***********ADC双缓冲配置***********************************************/
 #define ADC_BUF_SIZE 1024										//单个缓冲区大小
 volatile uint16_t ADC_BUFA[ADC_BUF_SIZE]; //缓冲区A
@@ -77,7 +75,8 @@ FRESULT fr;       // 操作结果
 
 uint8_t sd_file_opened = 0;  // 标记文件是否已打开
 
-
+/* 全局控制标志 */
+volatile uint8_t g_check_flush_request = 0; // 由TIM4触发，通知主循环检查超时
 /************有效区间结果结构体*****************************************/
 typedef struct 
 {
@@ -89,10 +88,7 @@ typedef struct
 } IntervalResult;
 IntervalResult results[MAX_INTERVALS];  // 结果数组
 uint8_t result_cnt = 0;                 // 结果计数
-// 全局变量：保存上一个缓冲区的结尾状态
-//uint8_t last_in_valid = 0;          // 上一个缓冲区结束时是否在有效区间
-//uint32_t last_start_time_us = 0;    // 上一个未完成区间的起始绝对时间（us）
-//uint16_t last_current_max = 0;      // 上一个未完成区间的最大值
+
 typedef struct {
     uint8_t in_valid;           // 当前是否在有效区间
     uint32_t start_time_us;     // 未完成区间的起始时间
@@ -218,7 +214,13 @@ void SD_Init(void)
 void SystemClock_Config(void);
 void ProcessBuffer(uint16_t *buf, uint32_t buf_start_us,uint8_t channel);
 void RecordInterval(uint32_t start_idx, uint32_t end_idx, uint16_t max_val,uint8_t channel);
-void WriteToSD(IntervalResult *data, uint16_t cnt);
+void WriteToSD(ResultBuffer *buf);
+void CheckAndFlushBuffers(void);
+/* 获取微秒级系统时间 (使用TIM5直接读取) */
+static inline uint32_t Get_SysTime_US(void) 
+{
+    return __HAL_TIM_GET_COUNTER(&htim5);
+}
 /**
   * @brief  The application entry point.
   * @retval int
@@ -239,12 +241,16 @@ int main(void)
 	
   MX_RTC_Init(); 
   MX_TIM2_Init();
-	MX_TIM3_Init();
+
+	MX_TIM5_Init();
 	MX_TIM4_Init();
   MX_USART1_UART_Init();
 	MX_FATFS_Init();
 	
 	SD_Init();
+	
+	// 初始化时间基准
+  HAL_TIM_Base_Start(&htim5); // 启动微秒计数器 (不要开中断)
 	
 	DMA_CurrentBuf = 0;  // 初始用BUFA
 	DMA2_CurrentBuf = 0;  // 初始用BUFC
@@ -256,17 +262,12 @@ int main(void)
 
 
 	HAL_TIM_Base_Start(&htim2);
-  HAL_TIM_Base_Start_IT(&htim3);  // 启动定时器（含中断）
+
 	// 5. 启动TIM4（最后启动，非实时任务不影响初始化）
   HAL_TIM_Base_Start_IT(&htim4);  // 启动TIM4，开始100ms异步写入SD卡
 
 	
-  BufA_start_us = sys_time_us;  // 初始化第一个缓冲区起始时间
-	current_res_buf[0]->start_us = sys_time_us;
-	BufC_start_us = sys_time_us;  // 初始化第一个缓冲区起始时间
-	current_res_buf[1]->start_us = sys_time_us;
-	BufE_start_us = sys_time_us;  // 初始化第一个缓冲区起始时间
-	current_res_buf[2]->start_us = sys_time_us;
+
   while (1)
   {
 //		printf("文件指针：%lu\n", fil_a.fptr);
@@ -303,6 +304,24 @@ int main(void)
 										BUFF_flag=0;
 			//HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_0);
 									}
+		
+		/* -------- 任务2: SD卡写入管理 (统一入口) -------- */
+    
+    // 触发条件1: 定时器心跳 (处理超时数据)
+    if (g_check_flush_request) {
+        g_check_flush_request = 0;
+        CheckAndFlushBuffers();
+    }
+    
+    // 触发条件2: 任何一个缓冲区满了 (Ready)
+    // 轮询所有ResultBuffer的状态
+    if (res_bufA.ready) WriteToSD(&res_bufA);
+    if (res_bufB.ready) WriteToSD(&res_bufB);
+    if (res_bufC.ready) WriteToSD(&res_bufC);
+    if (res_bufD.ready) WriteToSD(&res_bufD);
+    if (res_bufE.ready) WriteToSD(&res_bufE);
+    if (res_bufF.ready) WriteToSD(&res_bufF);
+
 
   }
   
@@ -353,6 +372,26 @@ void SystemClock_Config(void)
   }
 }
 
+
+// 检查并写入超时的数据
+void CheckAndFlushBuffers(void) 
+{
+    uint32_t now = Get_SysTime_US();
+    ResultBuffer *buffers[] = {&res_bufA, &res_bufB, &res_bufC, &res_bufD, &res_bufE, &res_bufF};
+    
+    for (int i = 0; i < 6; i++) {
+        ResultBuffer *buf = buffers[i];
+        // 如果缓冲区有数据，且 (当前时间 - 第一条数据时间) > 超时阈值
+        if (buf->cnt > 0 && !buf->ready) {
+            if ((now - buf->start_us) >= 2000000) {
+                // 强制标记为Ready，让主循环下一次迭代去写
+                // 或者直接写也可以
+                HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_0); // Debug LED
+                WriteToSD(buf); 
+            }
+        }
+    }
+}
 //缓冲区处理函数
 void ProcessBuffer(uint16_t *buf, uint32_t buf_start_us,uint8_t channel)
 {
@@ -376,7 +415,7 @@ void ProcessBuffer(uint16_t *buf, uint32_t buf_start_us,uint8_t channel)
 		uint32_t current_time_us = buf_start_us + i;  // 当前数据的绝对时间（us）				
     if (x > THRESHOLD_A)		//是否在有效区间
 		{
-//			consecutive_low_count = 0; // 检测到高电平，重置低电平计数器
+
       if (!in_valid)				//如果不在
 				{
 					in_valid = 1;			//开始有效区间置1
@@ -402,19 +441,12 @@ void ProcessBuffer(uint16_t *buf, uint32_t buf_start_us,uint8_t channel)
 					
 						if (in_valid) 		//判断之前是否在有效区间
 						{ 
-//									consecutive_low_count++;
-//									// 只有当连续检测到 CONSECUTIVE_LOW_THRESHOLD 个低电平时，才确认区间结束
-//									if (consecutive_low_count >= CONSECUTIVE_LOW_THRESHOLD)
-//									{
+
 										in_valid = 0;			//如果之前在，赋值让它不在
 										RecordInterval(start_time_us, current_time_us-1, current_max,channel);		//记录结果
-//										consecutive_low_count = 0; // 重置计数器
-//									}
+
 						}
-//						 else
-//							{
-//										consecutive_low_count = 0;
-//							}
+
 				}
   }
 
@@ -425,20 +457,16 @@ void ProcessBuffer(uint16_t *buf, uint32_t buf_start_us,uint8_t channel)
     adc_status[channel].start_time_us = start_time_us;
     adc_status[channel].current_max = current_max;
   }
-//	adc1_processed++;
-	
-  // 强制写入剩余数据（即使未满MAX_INTERVALS）
-//  if (result_cnt > 0)								//result_cnt表示计算当前已缓存的有效区间数量，如果长期在有效区间，实际它的值为0，这样就会卡着，一直不写数据进SD卡。
-//	{
-//    WriteToSD();
-//			result_cnt = 0;
-//  }
+
 }
 // 记录区间信息
 void RecordInterval(uint32_t start_us, uint32_t end_us, uint16_t max_val,uint8_t channel) //修改：start_us，end_us原uint16_t改成uint32_t
 {
 	ResultBuffer *buf = current_res_buf[channel];
-	if (buf->cnt == 0) buf->start_us = sys_time_us;
+	// 如果该缓冲区刚开始存第一条数据，记录时间戳用于超时检测
+    if (buf->cnt == 0) {
+        buf->start_us= Get_SysTime_US();
+    }
 	// 缓冲满则切换
     if (buf->cnt >= RESULT_BUF_SIZE)
     {
@@ -448,40 +476,24 @@ void RecordInterval(uint32_t start_us, uint32_t end_us, uint16_t max_val,uint8_t
 				else if(channel==2){current_res_buf[2]=(current_res_buf[2]==&res_bufE)? &res_bufF : &res_bufE;}
         return;
     }
-	// 若当前缓冲区是新切换的（cnt=0），记录开始缓存的时间
-//  if (current_res_buf->cnt == 0) {
-//    current_res_buf->start_us = sys_time_us;  // 用sys_time_us标记开始时间
-//  }
-	
-//	if (current_res_buf->cnt >= RESULT_BUF_SIZE) 
-//	{
-//			current_res_buf->ready = 1;  // 标记为可写入SD
-//			// 切换缓冲区（A→B或B→A）
-//			current_res_buf = (current_res_buf == &res_bufA) ? &res_bufB : &res_bufA;
-//		return;  // 切换后直接返回，新缓冲区的start_us将在下次调用时初始化
-//  }
+
 	// 新增超时触发逻辑：即使cnt未达标，缓存超过2秒也强制置位ready
-  uint32_t current_us = sys_time_us;
-  if (current_us - buf->start_us >= 2000000) {  // 2秒=2,000,000us
-    buf->ready = 1;  // 超时强制标记为就绪
-    if(channel==0){current_res_buf[0]=(current_res_buf[0]== &res_bufA)? &res_bufB : &res_bufA;}
-		else if(channel==1){current_res_buf[1]=(current_res_buf[1]== &res_bufC)? &res_bufD : &res_bufC;}
-		else if(channel==2){current_res_buf[2]=(current_res_buf[2]== &res_bufE)? &res_bufF : &res_bufE;}
-    return;
-  }
-//  if (result_cnt >= MAX_INTERVALS) 
-//	{
-//		WriteToSD();  // 临时写入当前数据
-//    result_cnt = 0;  // 重置计数器，准备记录新区间
-//	}
+//  uint32_t current_us = sys_time_us;
+//  if (current_us - buf->start_us >= 2000000) {  // 2秒=2,000,000us
+//    buf->ready = 1;  // 超时强制标记为就绪
+//    if(channel==0){current_res_buf[0]=(current_res_buf[0]== &res_bufA)? &res_bufB : &res_bufA;}
+//		else if(channel==1){current_res_buf[1]=(current_res_buf[1]== &res_bufC)? &res_bufD : &res_bufC;}
+//		else if(channel==2){current_res_buf[2]=(current_res_buf[2]== &res_bufE)? &res_bufF : &res_bufE;}
+//    return;
+//  }
+
 
 //  IntervalResult *res = &results[result_cnt];
 	IntervalResult *res = &buf->data[buf->cnt];
 	
 	if (end_us < start_us)
     {
-//        printf("!!! ERROR: Underflow detected in RecordInterval !!!\r\n");
-//        printf("!!! start_us=%llu, end_us=%llu !!!\r\n", start_us, end_us);
+
         // 可以选择不记录这个错误的区间，或者采取其他措施
         return; 
     }
@@ -493,11 +505,14 @@ void RecordInterval(uint32_t start_us, uint32_t end_us, uint16_t max_val,uint8_t
   res->max_val = max_val;
 	res->channel = channel + 1;
 	buf->cnt++;  // 计数+1
-//  result_cnt++;
+
 }
-void WriteToSD(IntervalResult *data, uint16_t cnt) 
+void WriteToSD(ResultBuffer *buf) 
 {
-  if (cnt == 0) return;
+  if (buf->cnt == 0) {
+        buf->ready = 0; // 复位标志
+        return;
+    }
 	
 	FILINFO fno;  // 文件信息结构体（用于判断文件是否存在）
   char rtc_time[20];             // 存放RTC时间字符串
@@ -527,11 +542,11 @@ void WriteToSD(IntervalResult *data, uint16_t cnt)
 				sd_file_opened = 1;
 		}
 	
-  for (uint8_t i = 0; i < cnt; i++) 
+  for (uint8_t i = 0; i < buf->cnt; i++) 
 	{
 		// 有效：格式化一行数据（带时间戳和换行）
     get_rtc_time(rtc_time);  // 获取当前时间
-    IntervalResult *res = &data[i];
+    IntervalResult *res = &buf->data[i];
 	 // 格式化数据（确保字符串有效）
     write_len = sprintf(line, "%s,%hhu,%hhu,%lu,%.2f\r\n",
                         rtc_time,res->channel, res->range, res->duration, (res->max_val*0.0241));
@@ -544,6 +559,9 @@ void WriteToSD(IntervalResult *data, uint16_t cnt)
   }
 
 	f_sync(&fil_a);
+	// 清空缓冲区状态
+    buf->cnt = 0;
+    buf->ready = 0;
 //	__enable_irq;
 //  f_close(&fil_a);
 
@@ -552,22 +570,26 @@ void WriteToSD(IntervalResult *data, uint16_t cnt)
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) 
 {		
+		uint32_t now = Get_SysTime_US();
+    // 估算缓冲区起始时间 = 当前时间 - (点数 * 周期)
+    // 注意：这假设DMA传输刚刚结束，误差在几微秒内，对于这种应用足够
+    uint32_t estimated_start = now - (ADC_BUF_SIZE * ADC_SAMPLE_PERIOD_US);
 if (hadc == &hadc1) {
-//	  adc1_total++;  // 每填满一个缓冲区，总计数+1
+
     // 1. 先停止当前DMA（确保安全切换地址）
     HAL_DMA_Abort(&hdma_adc1);
 
     // 2. 根据当前缓冲区，切换到另一个缓冲区+更新标志
     if (DMA_CurrentBuf == 0) {  // 上一轮用的是BUFA，这次切换到BUFB
       BUFA_flag = 1;            // 通知主循环处理BUFA
-      BufA_start_us = sys_time_us - ADC_BUF_SIZE;  // 补BUFA的起始时间（传输用了ADC_BUF_SIZE个us）
+      BufA_start_us = estimated_start;  // 补BUFA的起始时间（传输用了ADC_BUF_SIZE个us）
       
       // 配置DMA下一轮传输：内存地址=BUFB，长度=ADC_BUF_SIZE
       hdma_adc1.Instance->M0AR = (uint32_t)ADC_BUFB;
       DMA_CurrentBuf = 1;       // 标记当前缓冲区为BUFB
     } else {  // 上一轮用的是BUFB，这次切换到BUFA
       BUFB_flag = 1;            // 通知主循环处理BUFB
-      BufB_start_us = sys_time_us - ADC_BUF_SIZE;  // 补BUFB的起始时间
+      BufB_start_us = estimated_start;  // 补BUFB的起始时间
       
       // 配置DMA下一轮传输：内存地址=BUFA，长度=ADC_BUF_SIZE
       hdma_adc1.Instance->M0AR = (uint32_t)ADC_BUFA;
@@ -586,14 +608,14 @@ if (hadc == &hadc2) {
     // 2. 根据当前缓冲区，切换到另一个缓冲区+更新标志
     if (DMA2_CurrentBuf == 0) {  // 上一轮用的是BUFA，这次切换到BUFB
       BUFC_flag = 1;            // 通知主循环处理BUFA
-      BufC_start_us = sys_time_us - ADC_BUF_SIZE;  // 补BUFA的起始时间（传输用了ADC_BUF_SIZE个us）
+      BufC_start_us = estimated_start;  // 补BUFA的起始时间（传输用了ADC_BUF_SIZE个us）
       
       // 配置DMA下一轮传输：内存地址=BUFB，长度=ADC_BUF_SIZE
       hdma_adc2.Instance->M0AR = (uint32_t)ADC_BUFD;
       DMA2_CurrentBuf = 1;       // 标记当前缓冲区为BUFB
     } else {  // 上一轮用的是BUFB，这次切换到BUFA
       BUFD_flag = 1;            // 通知主循环处理BUFB
-      BufD_start_us = sys_time_us - ADC_BUF_SIZE;  // 补BUFB的起始时间
+      BufD_start_us = estimated_start;  // 补BUFB的起始时间
       
       // 配置DMA下一轮传输：内存地址=BUFA，长度=ADC_BUF_SIZE
       hdma_adc2.Instance->M0AR = (uint32_t)ADC_BUFC;
@@ -613,14 +635,14 @@ if (hadc == &hadc3) {
     // 2. 根据当前缓冲区，切换到另一个缓冲区+更新标志
     if (DMA3_CurrentBuf == 0) {  // 上一轮用的是BUFA，这次切换到BUFB
       BUFE_flag = 1;            // 通知主循环处理BUFA
-      BufE_start_us = sys_time_us - ADC_BUF_SIZE;  // 补BUFA的起始时间（传输用了ADC_BUF_SIZE个us）
+      BufE_start_us = estimated_start;  // 补BUFA的起始时间（传输用了ADC_BUF_SIZE个us）
       
       // 配置DMA下一轮传输：内存地址=BUFB，长度=ADC_BUF_SIZE
       hdma_adc3.Instance->M0AR = (uint32_t)ADC_BUFF;
       DMA3_CurrentBuf = 1;       // 标记当前缓冲区为BUFB
     } else {  // 上一轮用的是BUFB，这次切换到BUFA
       BUFF_flag = 1;            // 通知主循环处理BUFB
-      BufF_start_us = sys_time_us - ADC_BUF_SIZE;  // 补BUFB的起始时间
+      BufF_start_us = estimated_start;  // 补BUFB的起始时间
       
       // 配置DMA下一轮传输：内存地址=BUFA，长度=ADC_BUF_SIZE
       hdma_adc3.Instance->M0AR = (uint32_t)ADC_BUFE;
@@ -636,90 +658,13 @@ if (hadc == &hadc3) {
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) 
 {
- if (htim->Instance == TIM3)
-	{
-//		HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_0);
-    sys_time_us++;  // 每1us递增，无其他操作
-		return;
-  }
+ 
+ // TIM4 仅负责设置标志，不做重活
  if (htim->Instance == TIM4) 
-	{  
-//		HAL_NVIC_DisableIRQ(TIM3_IRQn);
-		
-    // 优先处理res_bufA
-    if (res_bufA.ready) {
-			HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_0);
-//			 sd_write_count++;
-//      printf("SD写入操作次数: %lu\n", sd_write_count);
-      WriteToSD(res_bufA.data, res_bufA.cnt);//31ms
-			
-			HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_0);
-      res_bufA.cnt = 0;        // 清空缓冲区
-      res_bufA.ready = 0;      // 标记为未就绪
-			res_bufA.start_us = 0;  // 重置超时计时
-    }
-//    // 再处理res_bufB
-    else if (res_bufB.ready) {
-			HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_0);
-//			 sd_write_count++;
-//      printf("SD写入操作次数: %lu\n", sd_write_count);
-      WriteToSD(res_bufB.data, res_bufB.cnt);//31ms
-			
-			HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_0);
-      res_bufB.cnt = 0;
-      res_bufB.ready = 0;
-			res_bufB.start_us = 0;
-    }
-		 // 优先处理res_bufA
-    if (res_bufC.ready) {
-			HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_0);
-//			 sd_write_count++;
-//      printf("SD写入操作次数: %lu\n", sd_write_count);
-      WriteToSD(res_bufC.data, res_bufC.cnt);//31ms
-			
-			HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_0);
-      res_bufC.cnt = 0;        // 清空缓冲区
-      res_bufC.ready = 0;      // 标记为未就绪
-			res_bufC.start_us = 0;  // 重置超时计时
-    }
-//    // 再处理res_bufB
-    else if (res_bufD.ready) {
-			HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_0);
-//			 sd_write_count++;
-//      printf("SD写入操作次数: %lu\n", sd_write_count);
-      WriteToSD(res_bufD.data, res_bufD.cnt);//31ms
-			
-			HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_0);
-      res_bufD.cnt = 0;
-      res_bufD.ready = 0;
-			res_bufD.start_us = 0;
-    }
-		 // 优先处理res_bufA
-    if (res_bufE.ready) {
-			HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_0);
-//			 sd_write_count++;
-//      printf("SD写入操作次数: %lu\n", sd_write_count);
-      WriteToSD(res_bufE.data, res_bufE.cnt);//31ms
-			
-			HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_0);
-      res_bufE.cnt = 0;        // 清空缓冲区
-      res_bufE.ready = 0;      // 标记为未就绪
-			res_bufE.start_us = 0;  // 重置超时计时
-    }
-//    // 再处理res_bufB
-    else if (res_bufF.ready) {
-			HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_0);
-//			 sd_write_count++;
-//      printf("SD写入操作次数: %lu\n", sd_write_count);
-      WriteToSD(res_bufF.data, res_bufF.cnt);//31ms
-			
-			HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_0);
-      res_bufF.cnt = 0;
-      res_bufF.ready = 0;
-			res_bufF.start_us = 0;
-    }
-//		HAL_NVIC_EnableIRQ(TIM3_IRQn);
-  }
+	{
+      g_check_flush_request = 1;
+   }
+  
 }
 
 

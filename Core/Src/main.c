@@ -36,7 +36,7 @@
 
 #define ADC_SAMPLE_PERIOD_US 1
 /***********ADC双缓冲配置***********************************************/
-#define ADC_BUF_SIZE 1024										//单个缓冲区大小
+#define ADC_BUF_SIZE 7000										//单个缓冲区大小
 volatile uint16_t ADC_BUFA[ADC_BUF_SIZE]; //缓冲区A
 volatile uint16_t ADC_BUFB[ADC_BUF_SIZE]; //缓冲区B
 volatile uint16_t ADC_BUFC[ADC_BUF_SIZE]; //缓冲区C
@@ -63,7 +63,8 @@ extern DMA_HandleTypeDef hdma_adc3;
 
 /***********时间基准***************************************************/
 volatile uint32_t sys_time_us = 0;
-
+// 定义全局变量，记录每个通道上一次处理结束的时间点
+uint32_t last_buf_end_us[3] = {0, 0, 0};
 /***********sd卡部分参数***********************************************/
 FIL fil_a;
 UINT bw_a;
@@ -395,6 +396,31 @@ void CheckAndFlushBuffers(void)
 //缓冲区处理函数
 void ProcessBuffer(uint16_t *buf, uint32_t buf_start_us,uint8_t channel)
 {
+		uint32_t expected_start = last_buf_end_us[channel];
+    uint32_t diff = 0;
+    
+    if (buf_start_us >= expected_start) {
+        diff = buf_start_us - expected_start;
+    } else {
+        // 32位溢出回滚情况，很少见但要处理
+        diff = (0xFFFFFFFF - expected_start) + buf_start_us + 1;
+    }
+
+    // 判读：如果断层超过 100us（或者一个采样周期），说明中间丢缓冲区了
+    // 注意：系统刚启动时 last_buf_end_us 是 0，也会触发一次，这是正常的
+    if (diff > 100 && last_buf_end_us[channel] != 0) 
+    {
+        // 发生了严重的数据丢失（SD卡卡顿导致 DMA 覆盖了数据）
+        // 必须立刻重置状态机，否则会产生 42ms 的假脉冲
+        adc_status[channel].in_valid = 0; 
+        adc_status[channel].start_time_us = 0;
+        adc_status[channel].current_max = 0;
+        
+        // 可选：亮个灯提示丢数据了
+        // HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_1); 
+    }
+	
+	
 	uint8_t in_valid = adc_status[channel].in_valid;  // 继承上一个缓冲区的状态，是否在有效区间
   uint32_t start_time_us = 0;            // 区间起始绝对时间（而非索引）
   uint16_t current_max =0;			//区间最大值
@@ -457,6 +483,7 @@ void ProcessBuffer(uint16_t *buf, uint32_t buf_start_us,uint8_t channel)
     adc_status[channel].start_time_us = start_time_us;
     adc_status[channel].current_max = current_max;
   }
+	last_buf_end_us[channel] = buf_start_us + (ADC_BUF_SIZE * ADC_SAMPLE_PERIOD_US);
 
 }
 // 记录区间信息
@@ -557,8 +584,22 @@ void WriteToSD(ResultBuffer *buf)
             break;
         }
   }
+// 不要每次都 Sync！积攒够了再 Sync！
+    static uint16_t sync_counter = 0;
+    sync_counter++;
 
-	f_sync(&fil_a);
+    // 每写入 10 次（即200个脉冲），或者缓冲区数据特别少（可能是最后一点数据）时才 Sync
+    if (sync_counter >= 10 || buf->cnt < RESULT_BUF_SIZE) {
+        fr = f_sync(&fil_a);
+        sync_counter = 0;
+        if (fr != FR_OK) {
+             printf("Sync Error: %d\r\n", fr);
+             sd_file_opened = 0; 
+        }
+    }
+    // 注意：如果不 Sync，数据在断电瞬间可能会丢失最后几百毫秒的内容
+    // 但换来的是写入速度提升 5~10 倍，极大减少丢包概率
+//	f_sync(&fil_a);
 	// 清空缓冲区状态
     buf->cnt = 0;
     buf->ready = 0;

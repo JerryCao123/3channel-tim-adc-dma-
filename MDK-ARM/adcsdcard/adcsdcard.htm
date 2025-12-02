@@ -3,7 +3,7 @@
 <title>Static Call Graph - [adcsdcard\adcsdcard.axf]</title></head>
 <body><HR>
 <H1>Static Call Graph for image adcsdcard\adcsdcard.axf</H1><HR>
-<BR><P>#&#060CALLGRAPH&#062# ARM Linker, 5060960: Last Updated: Mon Dec 01 16:26:25 2025
+<BR><P>#&#060CALLGRAPH&#062# ARM Linker, 5060960: Last Updated: Mon Dec 01 17:27:54 2025
 <BR><P>
 <H3>Maximum Stack Usage =        608 bytes + Unknown(Cycles, Untraceable Function Pointers)</H3><H3>
 Call chain for Maximum Stack Depth:</H3>
@@ -686,7 +686,7 @@ Global Symbols
 <LI><a href="#[e3]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;MX_ADC1_Init
 </UL>
 
-<P><STRONG><a name="[7b]"></a>HAL_ADC_ConvCpltCallback</STRONG> (Thumb, 272 bytes, Stack size 16 bytes, main.o(i.HAL_ADC_ConvCpltCallback))
+<P><STRONG><a name="[7b]"></a>HAL_ADC_ConvCpltCallback</STRONG> (Thumb, 274 bytes, Stack size 16 bytes, main.o(i.HAL_ADC_ConvCpltCallback))
 <BR><BR>[Stack]<UL><LI>Max Depth = 92<LI>Call Chain = HAL_ADC_ConvCpltCallback &rArr; HAL_ADC_Start_DMA &rArr; HAL_DMA_Start_IT &rArr; DMA_SetConfig
 </UL>
 <BR>[Calls]<UL><LI><a href="#[93]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;HAL_DMA_Abort
@@ -1345,8 +1345,8 @@ Global Symbols
 <P><STRONG><a name="[8]"></a>PendSV_Handler</STRONG> (Thumb, 2 bytes, Stack size 0 bytes, stm32f4xx_it.o(i.PendSV_Handler))
 <BR>[Address Reference Count : 1]<UL><LI> startup_stm32f407xx.o(RESET)
 </UL>
-<P><STRONG><a name="[f7]"></a>ProcessBuffer</STRONG> (Thumb, 188 bytes, Stack size 48 bytes, main.o(i.ProcessBuffer))
-<BR><BR>[Stack]<UL><LI>Max Depth = 68<LI>Call Chain = ProcessBuffer &rArr; RecordInterval
+<P><STRONG><a name="[f7]"></a>ProcessBuffer</STRONG> (Thumb, 292 bytes, Stack size 56 bytes, main.o(i.ProcessBuffer))
+<BR><BR>[Stack]<UL><LI>Max Depth = 76<LI>Call Chain = ProcessBuffer &rArr; RecordInterval
 </UL>
 <BR>[Calls]<UL><LI><a href="#[f8]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;RecordInterval
 </UL>
@@ -1793,7 +1793,7 @@ Global Symbols
 <P><STRONG><a name="[5]"></a>UsageFault_Handler</STRONG> (Thumb, 4 bytes, Stack size 0 bytes, stm32f4xx_it.o(i.UsageFault_Handler))
 <BR>[Address Reference Count : 1]<UL><LI> startup_stm32f407xx.o(RESET)
 </UL>
-<P><STRONG><a name="[8f]"></a>WriteToSD</STRONG> (Thumb, 282 bytes, Stack size 144 bytes, main.o(i.WriteToSD))
+<P><STRONG><a name="[8f]"></a>WriteToSD</STRONG> (Thumb, 340 bytes, Stack size 144 bytes, main.o(i.WriteToSD))
 <BR><BR>[Stack]<UL><LI>Max Depth = 568<LI>Call Chain = WriteToSD &rArr; f_open &rArr; find_volume &rArr; disk_initialize &rArr; MX_SDIO_SD_Init &rArr; HAL_SD_ConfigWideBusOperation &rArr; SD_WideBus_Enable &rArr; SD_FindSCR &rArr; SDMMC_CmdBlockLength &rArr; SDMMC_GetCmdResp1
 </UL>
 <BR>[Calls]<UL><LI><a href="#[11f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;f_write
